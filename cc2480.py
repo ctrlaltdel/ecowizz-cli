@@ -7,6 +7,9 @@ import sys
 import re
 import ast
 from time import sleep
+import multiprocessing as mp
+import Queue
+import traceback
 
 #
 # ANSI colors
@@ -34,6 +37,19 @@ def bold(t):
         return color(t, 1)
 
 #
+# From http://code.activestate.com/recipes/142812-hex-dumper/
+#
+def hexdump(src, length=8):
+    result = []
+    digits = 4 if isinstance(src, unicode) else 2
+    for i in xrange(0, len(src), length):
+       s = src[i:i+length]
+       hexa = b' '.join(["%0*X" % (digits, ord(x))  for x in s])
+       text = b''.join([x if 0x20 <= ord(x) < 0x7F else b'.'  for x in s])
+       result.append( b"%04X   %-*s   %s" % (i, length*(digits + 1), hexa, text) )
+    return b'\n'.join(result)
+
+#
 # Library for communication with a TI CC2480 Zigbee chip
 # 
 
@@ -47,74 +63,7 @@ def _fcs(msg):
 
 
 class Frame:
-  def __init__(self, cmd0, cmd1, data):
-    self.cmd0 = int(cmd0)
-    self.cmd1 = int(cmd1)
-
-    if type(data) == str:
-      self.data = data
-    elif type(data) == int:
-      self.data = chr(data)
-    elif type(data) == list or type(data) == tuple:
-      self.data = "".join(chr(c) for c in data)
-    else:
-      raise Exception("Unknown data format: %s" % type(data))
-
-    self.length = len(self.data)
-
-  @classmethod
-  def from_wire(cls, data):
-    length = ord(data[1])
-    fcs = ord(data[-1:])
-    cmd0 = ord(data[2])
-    cmd1 = ord(data[3])
-
-    if len(data) - 5 != length:
-      raise Exception("Invalid frame, size mismatch %i != %i" % (len(data) - 3, length))
-      #print "Invalid frame, size mismatch %i != %i" % (len(data) - 3, length)
-
-    # TODO check FCS
-    computed_fcs = _fcs(data[1:-1])
-    if fcs != computed_fcs:
-      raise Exception("FCS doesn't match, corruption? %x != %x" % (fcs, computed_fcs))
-
-
-    return cls(cmd0 = cmd0, cmd1 = cmd1, data = data[4:-1])
-
-  def serialize(self):
-    string = struct.pack("cBBB", SOF, self.length, self.cmd0, self.cmd1)
-    string += self.data
-    string += struct.pack("B", self.fcs)
-    return string
-
-  def _compute_fcs(self):
-    return _fcs(chr(self.cmd0) + chr(self.cmd1) + chr(self.length) + self.data)
-  fcs = property(_compute_fcs)
-
-  def __repr__(self):
-    res = ""
-
-    res += "cmd=%02x:%02x %s\n" % (self.cmd0, self.cmd1, " ".join(["%02x" % ord(c) for c in self.data]))
-
-    frame_type = int(self.cmd0 >> 5)
-    subsystem = int(self.cmd0 & 0x1F)
-    id = int(self.cmd1)
-
-    TYPES = {
-      0: 'POLL',
-      1: 'SREQ',
-      2: 'AREQ',
-      3: 'SRSP'
-    }
-
-    SUBSYSTEMS = {
-      1: 'SYS',
-      4: 'AF',
-      5: 'ZDO',
-      6: 'sAPI'
-    }
-
-    STATUS = {
+  STATUS = {
       0x00: 'ZSuccess',
       0x01: 'ZFailure',
       0x02: 'ZInvalidParameter',
@@ -167,7 +116,95 @@ class Frame:
       0xcb: 'ZNwkLeaveUnconfirmed',
       0xcc: 'ZNwkNoAck',
       0xcd: 'ZNwkNoRoute',
+  }
+
+  def __init__(self, cmd0, cmd1, data):
+    self.cmd0 = int(cmd0)
+    self.cmd1 = int(cmd1)
+
+    if type(data) == str:
+      self.data = data
+    elif type(data) == int:
+      self.data = chr(data)
+    elif type(data) == list or type(data) == tuple:
+      self.data = "".join(chr(c) for c in data)
+    else:
+      raise Exception("Unknown data format: %s" % type(data))
+
+    self.length = len(self.data)
+
+  @classmethod
+  def from_wire(cls, data):
+    length = ord(data[1])
+    fcs = ord(data[-1:])
+    cmd0 = ord(data[2])
+    cmd1 = ord(data[3])
+
+    if len(data) - 5 != length:
+      raise Exception("Invalid frame, size mismatch %i != %i" % (len(data) - 3, length))
+      #print "Invalid frame, size mismatch %i != %i" % (len(data) - 3, length)
+
+    # TODO check FCS
+    computed_fcs = _fcs(data[1:-1])
+    if fcs != computed_fcs:
+      raise Exception("FCS doesn't match, corruption? %x != %x" % (fcs, computed_fcs))
+
+
+    return cls(cmd0 = cmd0, cmd1 = cmd1, data = data[4:-1])
+
+  def serialize(self):
+    string = struct.pack("cBBB", SOF, self.length, self.cmd0, self.cmd1)
+    string += self.data
+    string += struct.pack("B", self.fcs)
+    return string
+
+  def payload_decode(self, command, data):
+    res = ""
+
+    if command == 0x00FB:
+      print len(data)
+      mac = struct.unpack("<6s", data)[0]
+      res += "MAC: " + hexlify(mac)
+    elif command == 0x00C1:
+      # 715BF24EFF7F25578006BB0C460E750691033BD0080000008000
+      seq = data[0]
+    else:
+      res += "Unknown command %04x" % command
+
+    res += "\n" + hexdump(data)
+    return res
+
+  def status(self, id):
+    return self.STATUS.get(id)
+
+  def _compute_fcs(self):
+    return _fcs(chr(self.cmd0) + chr(self.cmd1) + chr(self.length) + self.data)
+  fcs = property(_compute_fcs)
+
+  def __repr__(self):
+    res = ""
+
+    #res += hexdump(self.frame) + "\n"
+    res += "cmd=%02x:%02x %s\n" % (self.cmd0, self.cmd1, " ".join(["%02x" % ord(c) for c in self.data]))
+
+    frame_type = int(self.cmd0 >> 5)
+    subsystem = int(self.cmd0 & 0x1F)
+    id = int(self.cmd1)
+
+    TYPES = {
+      0: 'POLL',
+      1: 'SREQ',
+      2: 'AREQ',
+      3: 'SRSP'
     }
+
+    SUBSYSTEMS = {
+      1: 'SYS',
+      4: 'AF',
+      5: 'ZDO',
+      6: 'sAPI'
+    }
+
 
     frame_type = TYPES.get(frame_type)
     subsystem = SUBSYSTEMS.get(subsystem)
@@ -183,10 +220,12 @@ class Frame:
     if self.cmd1 == 0x83:
       res +=  "ZB_SEND_DATA_CONFIRM handle=%02x" % ord(self.data[0])
     if self.cmd1 == 0x87:
-      length = ord(self.data[4])
-      source, command, length, data = struct.unpack("<HHH%ds" % length, self.data)
+      #source, command, length, data = struct.unpack("<HHH%ds" % length, self.data)
+      source, command, length = struct.unpack("<HHH", self.data[0:6])
+      data = self.data[7:length][::-1]
       res +=  "ZB_RECEIVE_DATA_INDICATION source=%04x command=%04x len=%d" % (source, command, length)
-      res +=  " payload=" + hexlify(data).upper()
+      res +=  " payload=" + hexlify(data).upper() + "\n"
+      res += self.payload_decode(command, data)
 
     if self.cmd0 == 0x26 and self.cmd1 == 0x0A:
       #
@@ -222,18 +261,26 @@ class Frame:
       for i in xrange(OutputCommandsNum):
         res += " 0x%02x%02x" % (data[p+2*i+1], data[p+2*i])
 
-    if self.cmd0 == 0x26 and self.cmd1 == 0x05:
-      configid= ord(self.data[0])
-      res +=  "ZB_WRITE_CONFIGURATION ConfigID=%02x Len=%02x" % (ord(self.data[0]), ord(self.data[1]))
-      length = ord(self.data[1])
-      if length:
-        res += " Value=" + hexlify(self.data[2:2+length]).upper() + " "
+    if self.cmd0 == 0x26:
+      if self.cmd1 == 0x05:
+        configid= ord(self.data[0])
+        res +=  "ZB_WRITE_CONFIGURATION ConfigID=%02x Len=%02x" % (ord(self.data[0]), ord(self.data[1]))
+        length = ord(self.data[1])
+        if length:
+          res += " Value=" + hexlify(self.data[2:2+length]).upper() + " "
+  
+        if configid == 0x0003:
+          res += "ZCD_NV_STARTUP_OPTION"
+  
+        if configid == 0x0087:
+          res += "ZCE_NV_LOGICAL_TYPE"
+  
+      if self.cmd1 == 0x07:
+        res += "ZB_FIND_DEVICE_REQUEST SearchKey=%02X%02X%02X%02X%02X%02X%02X%02X" % data
 
-      if configid == 0x0003:
-        res += "ZCD_NV_STARTUP_OPTION"
+      if self.cmd1 == 0x08:
+        res +=  "ZB_PERMIT_JOINING_REQUEST Destination=%02x%02x Timeout=%02x" % (data[1], data[0], data[2])
 
-      if configid == 0x0087:
-        res += "ZCE_NV_LOGICAL_TYPE"
 
     if self.cmd1 == 0x06:
       param = ord(self.data[0])
@@ -244,47 +291,62 @@ class Frame:
 
         res +=  " payload=" + hexlify(self.data[1:]).upper()
 
-    if self.cmd1 == 0x08:
-      res +=  "ZB_PERMIT_JOINING_REQUEST"
-    if self.cmd0 == 0x21 and self.cmd1 == 0x02:
-      res += "SYS_VERSION"
-    if self.cmd0 == 0x26 and self.cmd1 == 0x02:
-      res +=  "ZB_ALLOW_BIND timeout=%02x" % ord(self.data[0])
+    if self.cmd0 == 0x21:
+      if self.cmd1 == 0x02:
+        res += "SYS_VERSION"
+      if self.cmd1 == 0x0D:
+        res += "SYS_ADC_READ channel=%02x resolution=%02x" % (data[0], data[1])
+
+    if self.cmd0 == 0x26:
+      if self.cmd1 == 0x01:
+        res +=  "ZB_BIND_DEVICE create=%d commandID=%02x%02x" % (ord(self.data[0]), ord(self.data[1+1]), ord(self.data[1+0]))
+
+      if self.cmd1 == 0x02:
+        res +=  "ZB_ALLOW_BIND timeout=%02x" % ord(self.data[0])
+
     if self.cmd1 == 0x03:
       if frame_type == 'SREQ':
         res +=  "ZB_SEND_DATA_REQUEST destination=%02x%02x commandID=%02x%02x handle=%02x" % (ord(self.data[1]), ord(self.data[0]), ord(self.data[2+1]), ord(self.data[2+0]), ord(self.data[2+2]))
       elif frame_type == 'SRSP':
         res +=  "ZB_SEND_DATA_REQUEST"
       res +=  " payload=" + hexlify(self.data).upper()
-    if self.cmd1 == 0x01:
-      res +=  "ZB_BZB_BIND_DEVICE create=%d commandID=%02x%02x" % (ord(self.data[0]), ord(self.data[1+1]), ord(self.data[1+0]))
-
     if frame_type == 'AREQ':
       if self.cmd1 == 0x00:
-        res +=  "SYS_RESET_REQ"
+        res += "SYS_RESET_REQ"
       if self.cmd1 == 0x80:
-        res +=  "SYS_RESET_IND reason=%d" % ord(self.data[0])
+        res += "SYS_RESET_IND reason=%d" % ord(self.data[0])
       if self.cmd1 == 0x02:
-        res +=  "SYS_VERSION transportRev=%d Product=%d Rel=%d.%d HwRev=%d" % (ord(self.data[0]), ord(self.data[1]), ord(self.data[2]), ord(self.data[3]), ord(self.data[4]))
+        res += "SYS_VERSION transportRev=%d Product=%d Rel=%d.%d HwRev=%d" % (ord(self.data[0]), ord(self.data[1]), ord(self.data[2]), ord(self.data[3]), ord(self.data[4]))
 
     if frame_type == 'ZDO': 
       if self.cmd1 == 0xb6:
-        res +=  "ZDO_MGMT_PERMIT_JOIN_RSP"
+        res += "ZDO_MGMT_PERMIT_JOIN_RSP"
 
     if frame_type == 'SREQ': 
       if self.cmd1 == 0x00:
-        res +=  "ZB_START_REQUEST"
+        res += "ZB_START_REQUEST"
 
     if frame_type == 'SRSP': 
       if self.cmd1 == 0x00:
-        res +=  "ZB_START_REQUEST"
+        res += "ZB_START_REQUEST"
 
-    if self.cmd0 == 0x46 and self.cmd1 == 0x80:
-      res +=  "ZB_START_CONFIRM Status=%s" % STATUS.get(ord(self.data[0]))
+    if self.cmd0 == 0x46:
+      if self.cmd1 == 0x80:
+        res += "ZB_START_CONFIRM Status=%s" % self.status(data[0])
+
+      if self.cmd1 == 0x85:
+        res += "ZB_FIND_DEVICE_CONFIRM SearchType=%02X SearchKey=%02X%02X Result=%02X%02X%02X%02X%02X%02X%02X%02X" % (data[0], data[2], data[1], data[3:]) 
 
     if self.cmd0 == 0x66:
+      if self.cmd1 == 0x02:
+        res += "ZB_ALLOW_BIND"
       if self.cmd1 == 0x05:
-        res += "ZB_WRITE_CONFIGURATION Status=%s" % STATUS.get(ord(self.data[0]))
+        res += "ZB_WRITE_CONFIGURATION Status=%s" % self.status(data[0])
+      if self.cmd1 == 0x07:
+        res += "ZB_FIND_DEVICE_REQUEST"
+      if self.cmd1 == 0x08:
+        res += "ZB_PERMIT_JOINING_REQUEST Stats=%s" % self.status(data[0])
+
     if self.cmd0 == 0x61:
       if self.cmd1 == 0x02:
         res += "SYS_VERSION TransportRev=%02x Product=%02x MajorRel=%02x MinorRel=%02x HwRev=%02x" % tuple([ord(c) for c in self.data])
@@ -294,6 +356,385 @@ class Frame:
       if self.cmd1 == 0x08:
         res += "SYS_OSAL_NV_READ"
 
+      if self.cmd1 == 0x0D:
+        res += "SYS_ADC_READ Value=%02x%02x" % (data[1], data[0])
+
+    #
+    # ZDO SREQ
+    #
+
+    if self.cmd0 == 0x25:
+      if self.cmd1 == 0x00:
+        res += "ZDO_NWK_ADDR_REQ"
+
+      if self.cmd1 == 0x01:
+        res += "ZDO_IEEE_ADDR_REQ"
+
+      if self.cmd1 == 0x02:
+        res += "ZDO_NODE_DESC_REQ"
+
+      if self.cmd1 == 0x03:
+        res += "ZDO_POWER_DESC_REQ"
+
+      if self.cmd1 == 0x04:
+        res += "ZDO_SIMPLE_DESC_REQ"
+
+      if self.cmd1 == 0x05:
+        res += "ZDO_ACTIVE_EP_REQ"
+
+      if self.cmd1 == 0x06:
+        res += "ZDO_MATCH_DESC_REQ"
+
+      if self.cmd1 == 0x07:
+        res += "ZDO_COMPLEX_DESC_REQ"
+
+      if self.cmd1 == 0x08:
+        res += "ZDO_USER_DESC_REQ"
+
+      if self.cmd1 == 0x0A:
+        res += "ZDO_DEVICE_ANNCE"
+
+      if self.cmd1 == 0x0B:
+        res += "ZDO_USER_DESC_SET"
+
+      if self.cmd1 == 0x0C:
+        res += "ZDO_SERVER_DISC_REQ"
+
+      if self.cmd1 == 0x20:
+        res += "ZDO_END_DEVICE_BIND_REQ"
+
+      if self.cmd1 == 0x21:
+        res += "ZDO_SIMPLE_DESC_RSP"
+
+      if self.cmd1 == 0x22:
+        res += "ZDO_UNBIND_REQ"
+
+      if self.cmd1 == 0x30:
+        res += "ZDO_MGMT_NWK_DISC_REQ"
+
+      if self.cmd1 == 0x31:
+        res += "ZDO_MGMT_LQI_REQ"
+
+      if self.cmd1 == 0x32:
+        res += "ZDO_MGMT_RTG_REQ"
+
+      if self.cmd1 == 0x33:
+        res += "ZDO_MGMT_BIND_REQ"
+
+      if self.cmd1 == 0x34:
+        res += "ZDO_MGMT_LEAVE_REQ"
+
+      if self.cmd1 == 0x35:
+        res += "ZDO_MGMT_DIRECT_JOIN_REQ"
+
+      if self.cmd1 == 0x36:
+        res += "ZDO_MGMT_PERMIT_JOIN_REQ"
+
+      if self.cmd1 == 0x37:
+        res += "ZDO_MGMT_NWK_UPDATE_REQ"
+
+      if self.cmd1 == 0x40:
+        res += "ZDO_STARTUP_FROM_APP"
+
+      if self.cmd1 == 0x23:
+        res += "ZDO_SET_LINK_KEY"
+
+      if self.cmd1 == 0x24:
+        res += "ZDO_REMOVE_LINK_KEY"
+
+      if self.cmd1 == 0x25:
+        res += "ZDO_GET_LINK_KEY"
+
+      if self.cmd1 == 0x26:
+        res += "ZDO_NWK_DISCOVERY_REQ"
+
+      if self.cmd1 == 0x27:
+        res += "ZDO_JOIN_REQ"
+
+      if self.cmd1 == 0x3E:
+        res += "MSG_CB_REGISTER"
+
+      if self.cmd1 == 0x3F:
+        res += "ZDO_ MSG_CB_REMOVE"
+
+    #
+    # ZDO AREQ
+    #
+    if self.cmd0 == 0x45:
+      if self.cmd1 == 0x41:
+        res += "ZDO_AUTO_FIND_DESTINATION"
+
+      if self.cmd1 == 0x80:
+        res += "ZDO_NWK_ADDR_RSP"
+
+      if self.cmd1 == 0x81:
+        res += "ZDO_IEEE_ADDR_RSP"
+
+      if self.cmd1 == 0x82:
+        res += "ZDO_NODE_DESC_RSP"
+
+      if self.cmd1 == 0x83:
+        res += "ZDO_POWER_DESC_RSP"
+
+      if self.cmd1 == 0x84:
+        res += "ZDO_SIMPLE_DESC_RSP"
+
+      if self.cmd1 == 0x85:
+        res += "ZDO_ACTIVE_EP_RSP"
+
+      if self.cmd1 == 0x86:
+        res += "ZDO_MATCH_DESC_RSP"
+
+      if self.cmd1 == 0x87:
+        res += "ZDO_COMPLEX_DESC_RSP"
+
+      if self.cmd1 == 0x88:
+        res += "ZDO_USER_DESC_RSP"
+
+      if self.cmd1 == 0x89:
+        res += "ZDO_USER_DESC_CONF"
+
+      if self.cmd1 == 0x8A:
+        res += "ZDO_SERVER_DISC_RSP"
+
+      if self.cmd1 == 0xA0:
+        res += "ZDO_END_DEVICE_BIND_RSP"
+
+      if self.cmd1 == 0xA1:
+        res += "ZDO_BIND_RSP"
+
+      if self.cmd1 == 0xA2:
+        res += "ZDO_UNBIND_RSP"
+
+      if self.cmd1 == 0xB0:
+        res += "ZDO_MGMT_NWK_DISC_RSP"
+
+      if self.cmd1 == 0xB1:
+        res += "ZDO_MGMT_LQI_RSP"
+
+      if self.cmd1 == 0xB2:
+        res += "ZDO_MGMT_RTG_RSP"
+
+      if self.cmd1 == 0xB3:
+        res += "ZDO_MGMT_BIND_RSP"
+
+      if self.cmd1 == 0xB4:
+        res += "ZDO_MGMT_LEAVE_RSP"
+
+      if self.cmd1 == 0xB5:
+        res += "ZDO_MGMT_DIRECT_JOIN_RSP"
+
+      if self.cmd1 == 0xB6:
+        res += "ZDO_MGMT_PERMIT_JOIN_RSP"
+
+      if self.cmd1 == 0xC0:
+        res += "ZDO_STATE_CHANGE_IND"
+
+      if self.cmd1 == 0xC1:
+        res += "ZDO_END_DEVICE_ANNCE_IND"
+
+      if self.cmd1 == 0xC2:
+        res += "ZDO_MATCH_DESC_RSP_SENT"
+
+      if self.cmd1 == 0xC3:
+        res += "ZDO_STATUS_ERROR_RSP"
+
+      if self.cmd1 == 0xC4:
+        res += "ZDO_SRC_RTG_IND"
+
+      if self.cmd1 == 0xFF:
+        res += "ZDO_ MSG_CB_INCOMING"
+
+
+
+    #
+    # ZDO SRSP
+    #
+    if self.cmd0 == 0x65:
+      if self.cmd1 == 0x00:
+        res += "ZDO_NWK_ADDR_REQ"
+
+      if self.cmd1 == 0x01:
+        res += "ZDO_IEEE_ADDR_REQ"
+
+      if self.cmd1 == 0x02:
+        res += "ZDO_NODE_DESC_REQ"
+
+      if self.cmd1 == 0x03:
+        res += "ZDO_POWER_DESC_REQ"
+
+      if self.cmd1 == 0x04:
+        res += "ZDO_SIMPLE_DESC_REQ"
+
+
+      if self.cmd1 == 0x05:
+        res += "ZDO_ACTIVE_EP_REQ"
+
+      if self.cmd1 == 0x06:
+        res += "ZDO_MATCH_DESC_REQ"
+
+      if self.cmd1 == 0x07:
+        res += "ZDO_COMPLEX_DESC_REQ"
+
+      if self.cmd1 == 0x08:
+        res += "ZDO_USER_DESC_REQ"
+
+      if self.cmd1 == 0x0A:
+        res += "ZDO_DEVICE_ANNCE"
+
+      if self.cmd1 == 0x0B:
+        res += "ZDO_USER_DESC_SET"
+
+      if self.cmd1 == 0x0C:
+        res += "ZDO_SERVER_DISC_REQ"
+
+      if self.cmd1 == 0x20:
+        res += "ZDO_END_DEVICE_BIND_REQ"
+
+      if self.cmd1 == 0x21:
+        res += "ZDO_SIMPLE_DESC_RSP"
+
+      if self.cmd1 == 0x22:
+        res += "ZDO_UNBIND_REQ"
+
+      if self.cmd1 == 0x30:
+        res += "ZDO_MGMT_NWK_DISC_REQ"
+
+      if self.cmd1 == 0x31:
+        res += "ZDO_MGMT_LQI_REQ"
+
+      if self.cmd1 == 0x32:
+        res += "ZDO_MGMT_RTG_REQ"
+
+      if self.cmd1 == 0x33:
+        res += "ZDO_MGMT_BIND_REQ"
+
+      if self.cmd1 == 0x34:
+        res += "ZDO_MGMT_LEAVE_REQ"
+
+      if self.cmd1 == 0x35:
+        res += "ZDO_MGMT_DIRECT_JOIN_REQ"
+
+      if self.cmd1 == 0x36:
+        res += "ZDO_MGMT_PERMIT_JOIN_REQ"
+
+      if self.cmd1 == 0x37:
+        res += "ZDO_MGMT_NWK_UPDATE_REQ"
+
+      if self.cmd1 == 0x40:
+        res += "ZDO_STARTUP_FROM_APP"
+
+      if self.cmd1 == 0x41:
+        res += "ZDO_AUTO_FIND_DESTINATION"
+
+      if self.cmd1 == 0x23:
+        res += "ZDO_SET_LINK_KEY"
+
+      if self.cmd1 == 0x24:
+        res += "ZDO_REMOVE_LINK_KEY"
+
+      if self.cmd1 == 0x25:
+        res += "ZDO_GET_LINK_KEY"
+
+      if self.cmd1 == 0x26:
+        res += "ZDO_NWK_DISCOVERY_REQ"
+
+      if self.cmd1 == 0x27:
+        res += "ZDO_JOIN_REQ"
+
+      if self.cmd1 == 0x80:
+        res += "ZDO_NWK_ADDR_RSP"
+
+      if self.cmd1 == 0x81:
+        res += "ZDO_IEEE_ADDR_RSP"
+
+      if self.cmd1 == 0x82:
+        res += "ZDO_NODE_DESC_RSP"
+
+      if self.cmd1 == 0x83:
+        res += "ZDO_POWER_DESC_RSP"
+
+      if self.cmd1 == 0x84:
+        res += "ZDO_SIMPLE_DESC_RSP"
+
+
+      if self.cmd1 == 0x85:
+        res += "ZDO_ACTIVE_EP_RSP"
+
+      if self.cmd1 == 0x86:
+        res += "ZDO_MATCH_DESC_RSP"
+
+      if self.cmd1 == 0x87:
+        res += "ZDO_COMPLEX_DESC_RSP"
+
+      if self.cmd1 == 0x88:
+        res += "ZDO_USER_DESC_RSP"
+
+      if self.cmd1 == 0x89:
+        res += "ZDO_USER_DESC_CONF"
+
+      if self.cmd1 == 0x8A:
+        res += "ZDO_SERVER_DISC_RSP"
+
+      if self.cmd1 == 0xA0:
+        res += "ZDO_END_DEVICE_BIND_RSP"
+
+      if self.cmd1 == 0xA1:
+        res += "ZDO_BIND_RSP"
+
+      if self.cmd1 == 0xA2:
+        res += "ZDO_UNBIND_RSP"
+
+      if self.cmd1 == 0xB0:
+        res += "ZDO_MGMT_NWK_DISC_RSP"
+
+      if self.cmd1 == 0xB1:
+        res += "ZDO_MGMT_LQI_RSP"
+
+      if self.cmd1 == 0xB2:
+        res += "ZDO_MGMT_RTG_RSP"
+
+      if self.cmd1 == 0xB3:
+        res += "ZDO_MGMT_BIND_RSP"
+
+      if self.cmd1 == 0xB4:
+        res += "ZDO_MGMT_LEAVE_RSP"
+
+      if self.cmd1 == 0xB5:
+        res += "ZDO_MGMT_DIRECT_JOIN_RSP"
+
+      if self.cmd1 == 0xB6:
+        res += "ZDO_MGMT_PERMIT_JOIN_RSP"
+
+      if self.cmd1 == 0xC0:
+        res += "ZDO_STATE_CHANGE_IND"
+
+      if self.cmd1 == 0xC1:
+        res += "ZDO_END_DEVICE_ANNCE_IND"
+
+      if self.cmd1 == 0xC2:
+        res += "ZDO_MATCH_DESC_RSP_SENT"
+
+      if self.cmd1 == 0xC3:
+        res += "ZDO_STATUS_ERROR_RSP"
+
+      if self.cmd1 == 0xC4:
+        res += "ZDO_SRC_RTG_IND"
+
+      if self.cmd1 == 0x3E:
+        res += "MSG_CB_REGISTER"
+
+      if self.cmd1 == 0x3F:
+        res += "ZDO_ MSG_CB_REMOVE"
+
+      if self.cmd1 == 0xFF:
+        res += "ZDO_ MSG_CB_INCOMING"
+
+
+
+    if self.cmd0 == 0x45:
+      if self.cmd1 == 0x84:
+        res += "ZDO_SIMPLE_DESC_RSP" # FIXME
 
     return res
 
@@ -353,16 +794,6 @@ class CC2480:
     print
     self.write(frame.serialize())
 
-  def ZB_SEND_DATA_REQUEST(self, destination, commandID, handle=0x00, ack=0x00, radius=0x01, data=""):
-
-    data_length = len(data)
-    payload = struct.pack("<HHBBBB", destination, commandID, handle, ack, radius, data_length)
-    payload += data
-    frame = Frame(0x26, 0x03, payload)
-    print frame
-    print
-    self.write(frame.serialize())
-
 #
 # Tests
 #
@@ -387,7 +818,11 @@ if __name__ == '__main__':
 
     for line in strace:
       #print line
-      syscall, data = re.findall('^(.+)\(\d+, "(.*)"', line)[0]
+
+      try:
+        syscall, data = re.findall('^(.+)\(\d+, "(.*)"', line)[0]
+      except IndexError:
+        continue
 
       data = ast.literal_eval('"' + data + '"')
 
@@ -398,76 +833,103 @@ if __name__ == '__main__':
         if res:
 
           for frame in re.findall("\xfe[^\xfe]+", res):
-            #print hexlify(frame).upper()
-            if syscall == 'write':
-              print red(repr(Frame.from_wire(frame)))
-            elif syscall == 'read':
-              print green(repr(Frame.from_wire(frame)))
-            print
+            print hexlify(frame).upper()
+
+            try:
+              if syscall == 'write':
+                print red(repr(Frame.from_wire(frame)))
+              elif syscall == 'read':
+                print green(repr(Frame.from_wire(frame)))
+              print
+            except Exception, e:
+              print e
         res = data
 
 
   else:
-    z = CC2480(sys.argv[1])
-    #z.write(unhexlify("fe00210223"))
 
-    # SYS_VERSION
-    z.send(0x21, 0x02)
-    z.receive()
+    def writer(q):
+      # SYS_VERSION
+      q.put((0x21, 0x02))
+      
+      # SYS_RESET_REQ
+      q.put((0x41, 0x00, 0x1))
+  
+      # ZB_START_REQUEST
+      q.put((0x26, 0x00, 0x00))
+  
+      # ZB_APP_REGISTER_REQUEST
+      q.put((0x26, 0x0a, 0x01, 0x44, 0x04, 0x00, 0x00, 0x01, 0x00, 0x06, 0x81, 0x00, 0x82, 0x00, 0xc1, 0x00, 0x83, 0x00, 0xfb, 0x00, 0xfd, 0x00, 0x08, 0x01, 0x00, 0x41, 0x00, 0x02, 0x00, 0x42, 0x00, 0x03, 0x00, 0x43, 0x00, 0xfa, 0x00, 0xfc, 0x00))
+  
+      # ZB_RECEIVE_DATA_INDICATION
+      #q.put((0x46, 0x87, [0x01, 0x00, 0xfb, 0x00, 0x0d, 0x00, 0x00, 0x01, 0x00, 0xb1, 0x01, 0x2d, 0x27, 0x82, 0x00, 0x00, 0x4b, 0x12, 0x00]))
+  
+      #z.write(unhexlify("fe2ab7e8b4ef5997479bb2a613741b55ade07117"))))
     
-    # SYS_RESET_REQ
-    z.send(0x41, 0x00, 0x1)
-    z.receive()
+      # ZB_GET_DEVICE_INFO
+      #for param in xrange(0, 8):
+      #  q.put((0x26, 0x06, param))
 
-    sleep(1)
+      def ZB_SEND_DATA_REQUEST(destination, commandID, handle=0x00, ack=0x00, radius=0x01, data=""):
+        data_length = len(data)
+        payload = struct.pack("<HHBBBB", destination, commandID, handle, ack, radius, data_length)
+        payload += data
+        return (0x26, 0x03) + tuple([ord(c) for c in payload])
+   
+      while False:
+        # Prise 1 ON
+        q.put(ZB_SEND_DATA_REQUEST(
+          destination=0x0001,
+          commandID=0x0002,
+          handle=0x01,
+          ack=0xff,
+          radius=0xff,
+          data="\ff"))
 
-    # ZB_START_REQUEST
-    z.send(0x26, 0x00, 0x00)
-    z.receive()
+        sleep(10)
+    
+        # Prise 1 OFF
+        q.put(ZB_SEND_DATA_REQUEST(
+          destination=0x0001,
+          commandID=0x0002,
+          handle=0x01,
+          ack=0xff,
+          radius=0xff,
+          data="\00"))
 
-    # ZB_APP_REGISTER_REQUEST
-    z.send(0x26, 0x0a, [0x01, 0x44, 0x04, 0x00, 0x00, 0x01, 0x00, 0x06, 0x81, 0x00, 0x82, 0x00, 0xc1, 0x00, 0x83, 0x00, 0xfb, 0x00, 0xfd, 0x00, 0x08, 0x01, 0x00, 0x41, 0x00, 0x02, 0x00, 0x42, 0x00, 0x03, 0x00, 0x43, 0x00, 0xfa, 0x00, 0xfc, 0x00])
+        sleep(10)
 
-    sleep(2)
-    z.receive()
-    z.receive()
-    z.receive()
-    z.receive()
-    z.receive()
+    def reader(q):
+      z = CC2480(sys.argv[1])
 
-    # ZB_RECEIVE_DATA_INDICATION
-    #z.send(0x46, 0x87, [0x01, 0x00, 0xfb, 0x00, 0x0d, 0x00, 0x00, 0x01, 0x00, 0xb1, 0x01, 0x2d, 0x27, 0x82, 0x00, 0x00, 0x4b, 0x12, 0x00])
-    #z.receive()
+      while True:
+        #print "tick"
+        z.receive()
+        try:
+          data = q.get(False)
 
-    #z.write(unhexlify("fe2ab7e8b4ef5997479bb2a613741b55ade07117"))
-    #z.receive()
-  
-    # ZB_GET_DEVICE_INFO
-    #for param in xrange(0, 8):
-    #  z.send(0x26, 0x06, param)
-    #  z.receive()
-  
-    for i in xrange(2):
-      # Prise 1 ON
-      z.ZB_SEND_DATA_REQUEST(
-        destination=0x0001,
-        commandID=0x0002,
-        handle=0x01,
-        ack=0xff,
-        radius=0xff,
-        data="\ff")
-      z.receive() 
-  
-      sleep(10)
-  
-      # Prise 1 OFF
-      z.ZB_SEND_DATA_REQUEST(
-        destination=0x0001,
-        commandID=0x0002,
-        handle=0x01,
-        ack=0xff,
-        radius=0xff,
-        data="\00")
-      z.receive()
+          if data:
+            z.send(data[0], data[1], data[2:])
+        except Queue.Empty:
+          pass
+        except Exception:
+          traceback.print_exc()
+        
+        sleep(0.1)
+ 
+    # Shared communication queue
+    q = mp.Queue()
 
-      sleep(10)
+    r = mp.Process(target=reader, args=(q,))
+    r.start()
+
+    w = mp.Process(target=writer, args=(q,))
+    w.start()
+
+    # Interactive shell
+    while True:
+      data = raw_input()
+      q.put(tuple([ord(c) for c in unhexlify(data.translate(None, " :."))]))
+
+    r.join()
+    w.join()
