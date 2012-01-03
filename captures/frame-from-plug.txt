@@ -1,0 +1,15 @@
+AREQ: sAPI 0x87 ZB_RECEIVE_DATA_INDICATION source=0001 command=00c1
+len=26 payload=3586B54EFF7F0459160000003400000000000000000000008000
+
+cmd=46:87
+    01 00
+    c1 00
+    1a 00 # Data length = 26
+    
+    35 86 b5        # ZCL Frame header??
+    4e ff 7f 04
+    59 16 00 00
+    00 34 00 00
+    00 00 00 00
+    00 00 00 00
+    00 80 00

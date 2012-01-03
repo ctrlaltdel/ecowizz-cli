@@ -161,17 +161,15 @@ class Frame:
   def payload_decode(self, command, data):
     res = ""
 
-    if command == 0x00FB:
-      print len(data)
-      mac = struct.unpack("<6s", data)[0]
-      res += "MAC: " + hexlify(mac)
-    elif command == 0x00C1:
+    #if command == 0x00FB:
+    #  mac = struct.unpack("<6s", data)[0]
+    #  res += "MAC: " + hexlify(mac)
+    if command == 0x00C1:
       # 715BF24EFF7F25578006BB0C460E750691033BD0080000008000
       seq = data[0]
     else:
       res += "Unknown command %04x" % command
 
-    res += "\n" + hexdump(data)
     return res
 
   def status(self, id):
@@ -221,8 +219,9 @@ class Frame:
       res +=  "ZB_SEND_DATA_CONFIRM handle=%02x" % ord(self.data[0])
     if self.cmd1 == 0x87:
       #source, command, length, data = struct.unpack("<HHH%ds" % length, self.data)
-      source, command, length = struct.unpack("<HHH", self.data[0:6])
-      data = self.data[7:length][::-1]
+      source, command, length = struct.unpack_from("<HHH", self.data)
+      #data = self.data[7:length][::-1]
+      data = struct.unpack_from("<%ds" % length, self.data, 6)[0]
       res +=  "ZB_RECEIVE_DATA_INDICATION source=%04x command=%04x len=%d" % (source, command, length)
       res +=  " payload=" + hexlify(data).upper() + "\n"
       res += self.payload_decode(command, data)
@@ -781,6 +780,7 @@ class CC2480:
     f = Frame.from_wire(frame)
 
     if f:
+      print red(hexdump(frame))
       print red(repr(f))
       print
     else:
@@ -833,7 +833,7 @@ if __name__ == '__main__':
         if res:
 
           for frame in re.findall("\xfe[^\xfe]+", res):
-            print hexlify(frame).upper()
+            print hexdump(frame)
 
             try:
               if syscall == 'write':
