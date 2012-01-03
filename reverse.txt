@@ -1,0 +1,178 @@
+Clé USB
+=======
+
+IEEE Address: 22 04 82 00 00 4B 12 00
+              04 22 00 82 4B 00 00 12
+
+
+Bouton
+======
+
+00 12 4B 00 01 23 61 E6
+
+
+Prise 1
+=======
+
+IEEE Address:  00 12 4b 00 00 82 12 23
+Short Address: 00 01
+
+OFF depuis site web prise 1:
+
+In [20]: Frame.from_wire("\376\t&\3\1\0\2\0%\377\377\1\0\v")
+
+cmd=26:03 01 00 02 00 25 ff ff 01 00
+SREQ: sAPI 0x03 ZB_SEND_DATA_REQUEST destination=0001 commandID=0002 handle=25 payload=0100020025FFFF0100
+
+
+ON depuis site web:
+
+In [21]: Frame.from_wire("\376\t&\3\1\0\2\0(\377\377\1\377\371")
+
+cmd=26:03 01 00 02 00 28 ff ff 01 ff
+SREQ: sAPI 0x03 ZB_SEND_DATA_REQUEST destination=0001 commandID=0002 handle=28 payload=0100020028FFFF01FF
+
+[...]
+
+ON
+
+In [22]: Frame.from_wire("\376\t&\3\1\0\2\0001\377\377\1\377\340")
+
+cmd=26:03 01 00 02 00 31 ff ff 01 ff
+SREQ: sAPI 0x03 ZB_SEND_DATA_REQUEST destination=0001 commandID=0002 handle=31 payload=0100020031FFFF01FF
+
+OFF
+
+In [23]: Frame.from_wire("\376\t&\3\1\0\2\0002\377\377\1\0\34")
+
+cmd=26:03 01 00 02 00 32 ff ff 01 00
+SREQ: sAPI 0x03 ZB_SEND_DATA_REQUEST destination=0001 commandID=0002 handle=32 payload=0100020032FFFF0100
+
+ON
+
+In [24]: Frame.from_wire("\376\t&\3\1\0\2\0003\377\377\1\377\342")
+
+cmd=26:03 01 00 02 00 33 ff ff 01 ff
+SREQ: sAPI 0x03 ZB_SEND_DATA_REQUEST destination=0001 commandID=0002 handle=33 payload=0100020033FFFF01FF
+
+
+Prise 2
+=======
+
+MAC Address: 00 12 4B 00 00 82 27 2D
+Short Address: 14 3e
+
+
+Commands
+========
+
+
+
+6 InputCommands:
+  - 0x0081
+  - 0x0082
+  - 0x00c1
+
+    Etat du relais? Consommation?
+
+    cmd=46:87 01 00 c1 00 1a 00 63 39 e1 4e ff 7f 2c 8c 00 00 fd 87 fe 87 00 00 ff 03 39 52 0a 00 00 00 00 00
+    AREQ: sAPI 0x87 ZB_RECEIVE_DATA_INDICATION source=0001 command=00c1 len=26 payload=6339E14EFF7F2C8C0000FD87FE870000FF0339520A0000000000
+
+    5 paquets toutes les ~20 secondes
+
+    len=26 payload=6339E14EFF7F2C8C0000FD87FE870000FF0339520A0000000000
+    len=26 payload=6439E14EFF7F298C0000FA87FC87D301FF035A640A0000000000
+    len=26 payload=6539E14EFF7F2C8C0000058805880000FF036C6D0A0000000000
+    len=26 payload=6639E14EFF7F298C000002880288000000048E7F0A0000000000
+    len=26 payload=6739E14EFF7F2C8C0000058805880000FF03A0880A0000000000
+
+  - 0x0083
+  - 0x00fb
+
+    BEACON
+
+    1 paquet  toutes les ~20 secondes
+
+    cmd=46:87 01 00 fb 00 0d 00 00 01 00 b1 01 23 12 82 00 00 4b 12 00
+    AREQ: sAPI 0x87 ZB_RECEIVE_DATA_INDICATION source=0001 command=00fb len=13 payload=000100B10123128200004B1200
+
+  - 0x00fd
+
+8 OutputCommands:
+  - 0x0001
+  - 0x0002
+
+    Relais ON/OFF
+
+  - 0x0003
+  - 0x0041
+  - 0x0042
+  - 0x0043
+  - 0x00fa
+
+Vas-y envoie-moi les données de conso en realtime
+
+prise 1:
+26:03 01 00 fa 00 00 00 ff 03 00 b1 01
+
+prise 2:
+26:03 3E 14 fa 00 00 00 ff 03 00 b1 01
+
+  - 0x00fc
+
+
+ON  Prise 1:
+26:03 01 00 02 00 01 ff ff 01 ff
+
+OFF Prise 1:
+26:03 01 00 02 00 02 ff ff 01 00
+
+ON  Prise 2:
+26:03 3e 14 02 00 01 ff ff 01 ff
+
+OFF Prise 2:
+26:03 3e 14 02 00 02 ff ff 01 00
+
+Message decoding
+================
+
+cmd=46:87 01 00 fb 00 0d 00 f0 01 00 b1 01 23 12 82 00 00 4b 12 00
+AREQ: sAPI 0x87 ZB_RECEIVE_DATA_INDICATION source=0001 command=00fb len=13 payload=F00100B101 23128200004B1200
+
+?:            F0 01 00 B1 01 
+MAC: 23 12 82 00 00 4B 12 00
+
+cmd=46:87 3e 14 fb 00 0d 00 f0 01 00 b1 01 2d 27 82 00 00 4b 12 00
+AREQ: sAPI 0x87 ZB_RECEIVE_DATA_INDICATION source=143e command=00fb len=13 payload=F00100B101 2D278200004B1200
+
+?:            F0 01 00 B1 01
+MAC: 2D 27 82 00 00 4B 12 00
+
+
+ON:
+cmd=46:87 01 00 c1 00 1a 00 75 03 00 00 00 82 94 00 19 00 00 00 00 00 00 00 00 00 01 00 00 00 00 00 01 00
+AREQ: sAPI 0x87 ZB_RECEIVE_DATA_INDICATION source=0001 command=00c1 len=26 payload=7503000000829400190000000000000000000100000000000100
+
+                  75 03
+00 00 00 82 94 00 19 00 
+00 00 00 00 00 00 00 00
+01 00 00 00 00 00 01 00
+
+OFF:
+cmd=46:87 01 00 c1 00 1a 00 b5 03 00 00 00 82 9a 59 57 00 4f 00 c8 00 b5 00 95 01 05 02 00 00 00 00 81 00
+AREQ: sAPI 0x87 ZB_RECEIVE_DATA_INDICATION source=0001 command=00c1 len=26 payload=B503000000829A5957004F00C800B50095010502000000008100
+
+
+                  B5 03
+00 00 00 82 9A 59 57 00
+4F 00 C8 00 B5 00 95 01 
+05 02 00 00 00 00 81 00
+
+
+                  09 10
+00 00 00 82 00 01 00 FF 
+4B 12 00 00 00 00 00 00
+CB 21 00 00 00 00 02 00
+
+
+
